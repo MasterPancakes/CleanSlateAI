@@ -16,7 +16,6 @@ import {
   Settings,
 } from "lucide-react";
 
-// You can hardcode your key here or use the UI to input it.
 const DEFAULT_API_KEY = "";
 
 export default function App() {
@@ -30,13 +29,12 @@ export default function App() {
   const [showSettings, setShowSettings] = useState(false);
   const [aiAnalysis, setAiAnalysis] = useState(null);
   const [isAiWorking, setIsAiWorking] = useState(false);
-  const [aiMode, setAiMode] = useState(null); // 'remove' | 'analyze'
+  const [aiMode, setAiMode] = useState(null);
 
   const canvasRef = useRef(null);
   const maskCanvasRef = useRef(null);
   const containerRef = useRef(null);
   const [isDrawing, setIsDrawing] = useState(false);
-  const [mousePos, setMousePos] = useState({ x: 0, y: 0 });
 
   // Initialize canvases
   useEffect(() => {
@@ -46,6 +44,7 @@ export default function App() {
       img.onload = () => {
         const w = img.width;
         const h = img.height;
+        // On init, set canvas size to match image resolution
         canvasRef.current.width = w;
         canvasRef.current.height = h;
         maskCanvasRef.current.width = w;
@@ -64,7 +63,7 @@ export default function App() {
       const reader = new FileReader();
       reader.onload = (evt) => {
         setImage(evt.target.result);
-        setAiAnalysis(null); // Reset analysis on new image
+        setAiAnalysis(null);
       };
       reader.readAsDataURL(file);
     }
@@ -76,8 +75,17 @@ export default function App() {
     const rect = canvasRef.current.getBoundingClientRect();
     const scaleX = canvasRef.current.width / rect.width;
     const scaleY = canvasRef.current.height / rect.height;
-    const clientX = e.touches ? e.touches[0].clientX : e.clientX;
-    const clientY = e.touches ? e.touches[0].clientY : e.clientY;
+
+    // Support Touch & Mouse
+    let clientX, clientY;
+    if (e.touches && e.touches.length > 0) {
+      clientX = e.touches[0].clientX;
+      clientY = e.touches[0].clientY;
+    } else {
+      clientX = e.clientX;
+      clientY = e.clientY;
+    }
+
     return {
       x: (clientX - rect.left) * scaleX,
       y: (clientY - rect.top) * scaleY,
@@ -85,21 +93,27 @@ export default function App() {
   };
 
   const startDrawing = (e) => {
+    // Prevent scrolling on touch
+    if (e.type === "touchstart") document.body.style.overflow = "hidden";
     setIsDrawing(true);
     draw(e);
   };
 
   const stopDrawing = () => {
+    // Re-enable scrolling
+    document.body.style.overflow = "";
     setIsDrawing(false);
     const ctx = maskCanvasRef.current?.getContext("2d");
     if (ctx) ctx.beginPath();
   };
 
   const draw = (e) => {
-    if (!isDrawing && e.type !== "mousedown" && e.type !== "touchstart") return;
+    if (!isDrawing) return;
+    // For mouse, we check buttons. For touch, we assume drawing if isDrawing is true
+    if (e.type === "mousemove" && e.buttons !== 1) return;
+
     if (!maskCanvasRef.current) return;
     const { x, y } = getCoordinates(e);
-    setMousePos({ x, y });
     const ctx = maskCanvasRef.current.getContext("2d");
     ctx.globalCompositeOperation = "source-over";
     ctx.lineWidth = brushSize;
@@ -137,14 +151,13 @@ export default function App() {
   };
 
   // --- GEMINI API HELPERS ---
-
   const getBase64Image = () => {
     if (!canvasRef.current) return null;
     return canvasRef.current.toDataURL("image/png").split(",")[1];
   };
 
   const callGeminiWithBackoff = async (url, payload) => {
-    const delays = [1000, 2000, 4000, 8000, 16000];
+    const delays = [1000, 2000, 4000];
     for (let i = 0; i <= delays.length; i++) {
       try {
         const response = await fetch(url, {
@@ -162,7 +175,6 @@ export default function App() {
     }
   };
 
-  // 1. AI Analysis (Vision + Text)
   const handleAiAnalyze = async () => {
     if (!apiKey) {
       setShowSettings(true);
@@ -170,7 +182,6 @@ export default function App() {
     }
     setIsAiWorking(true);
     setAiMode("analyze");
-
     try {
       const base64Data = getBase64Image();
       const payload = {
@@ -185,14 +196,11 @@ export default function App() {
           },
         ],
       };
-
       const result = await callGeminiWithBackoff(
         `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-09-2025:generateContent?key=${apiKey}`,
         payload
       );
-
-      const text = result.candidates?.[0]?.content?.parts?.[0]?.text;
-      setAiAnalysis(text);
+      setAiAnalysis(result.candidates?.[0]?.content?.parts?.[0]?.text);
     } catch (err) {
       alert("AI Analysis failed: " + err.message);
     } finally {
@@ -200,7 +208,6 @@ export default function App() {
     }
   };
 
-  // 2. AI Magic Erase (Image-to-Image)
   const handleAiErase = async () => {
     if (!apiKey) {
       setShowSettings(true);
@@ -208,7 +215,6 @@ export default function App() {
     }
     setIsAiWorking(true);
     setAiMode("remove");
-
     try {
       const base64Data = getBase64Image();
       const payload = {
@@ -216,7 +222,7 @@ export default function App() {
           {
             parts: [
               {
-                text: "Remove the watermark or text from the bottom right corner of this image. Keep the rest of the image exactly identical. High quality, seamless blend.",
+                text: "Remove the watermark or text from the bottom right corner. Keep the rest exact. seamless.",
               },
               { inlineData: { mimeType: "image/png", data: base64Data } },
             ],
@@ -224,14 +230,10 @@ export default function App() {
         ],
         generationConfig: { responseModalities: ["IMAGE"] },
       };
-
-      // Note: Using image-preview model for editing tasks
       const result = await callGeminiWithBackoff(
         `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-image-preview:generateContent?key=${apiKey}`,
         payload
       );
-
-      // Extract image
       const inlineData = result.candidates?.[0]?.content?.parts?.find(
         (p) => p.inlineData
       );
@@ -252,19 +254,15 @@ export default function App() {
         };
         newImg.src = `data:image/png;base64,${inlineData.inlineData.data}`;
       } else {
-        throw new Error("No image generated");
+        throw new Error("No image");
       }
     } catch (err) {
-      alert(
-        "AI Erase failed. Try checking your API key or trying again. " +
-          err.message
-      );
+      alert("AI Erase failed: " + err.message);
     } finally {
       setIsAiWorking(false);
     }
   };
 
-  // 3. AI Text-to-Speech
   const handleSpeak = async () => {
     if (!apiKey || !aiAnalysis) return;
     try {
@@ -272,14 +270,10 @@ export default function App() {
         contents: [
           {
             parts: [
-              {
-                text:
-                  "Read this in a friendly tone: " +
-                  aiAnalysis.substring(0, 300),
-              },
+              { text: "Read this nicely: " + aiAnalysis.substring(0, 300) },
             ],
           },
-        ], // limit length
+        ],
         generationConfig: {
           responseModalities: ["AUDIO"],
           speechConfig: {
@@ -288,64 +282,48 @@ export default function App() {
         },
         model: "gemini-2.5-flash-preview-tts",
       };
-
       const result = await callGeminiWithBackoff(
         `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-tts:generateContent?key=${apiKey}`,
         payload
       );
-
       const audioData =
         result.candidates?.[0]?.content?.parts?.[0]?.inlineData?.data;
       if (audioData) {
-        // Simple WAV header construction for PCM16 (assuming 24kHz from API default usually, but we need to check docs.
-        // For simplicity in this demo, we assume the browser can decode the containerless PCM if we wrap it,
-        // OR we rely on the fact that sometimes the API returns a playable container.
-        // *Correction*: The API returns raw PCM.
-        // We will do a quick trick: Use a valid WAV header.
-
         const pcmData = Uint8Array.from(atob(audioData), (c) =>
           c.charCodeAt(0)
         );
         const wavHeader = new ArrayBuffer(44);
         const view = new DataView(wavHeader);
-        // RIFF chunk descriptor
+        const writeString = (view, offset, string) => {
+          for (let i = 0; i < string.length; i++)
+            view.setUint8(offset + i, string.charCodeAt(i));
+        };
         writeString(view, 0, "RIFF");
         view.setUint32(4, 36 + pcmData.length, true);
         writeString(view, 8, "WAVE");
-        // fmt sub-chunk
         writeString(view, 12, "fmt ");
         view.setUint32(16, 16, true);
-        view.setUint16(20, 1, true); // PCM
-        view.setUint16(22, 1, true); // Mono
-        view.setUint32(24, 24000, true); // Sample rate
-        view.setUint32(28, 24000 * 2, true); // Byte rate
-        view.setUint16(32, 2, true); // Block align
-        view.setUint16(34, 16, true); // Bits per sample
-        // data sub-chunk
+        view.setUint16(20, 1, true);
+        view.setUint16(22, 1, true);
+        view.setUint32(24, 24000, true);
+        view.setUint32(28, 24000 * 2, true);
+        view.setUint16(32, 2, true);
+        view.setUint16(34, 16, true);
         writeString(view, 36, "data");
         view.setUint32(40, pcmData.length, true);
-
-        const blob = new Blob([view, pcmData], { type: "audio/wav" });
-        const audio = new Audio(URL.createObjectURL(blob));
+        const audio = new Audio(
+          URL.createObjectURL(new Blob([view, pcmData], { type: "audio/wav" }))
+        );
         audio.play();
       }
     } catch (err) {
-      console.error(err);
       alert("TTS failed: " + err.message);
     }
   };
 
-  const writeString = (view, offset, string) => {
-    for (let i = 0; i < string.length; i++) {
-      view.setUint8(offset + i, string.charCodeAt(i));
-    }
-  };
-
-  // --- Local Algorithmic Removal (The "CleanSlate Ultra") ---
   const removeWatermarkLocal = async () => {
     if (!canvasRef.current || !maskCanvasRef.current) return;
     setIsProcessing(true);
-
     setTimeout(() => {
       const canvas = canvasRef.current;
       const maskCanvas = maskCanvasRef.current;
@@ -353,12 +331,10 @@ export default function App() {
       const h = canvas.height;
       const ctx = canvas.getContext("2d");
       const maskCtx = maskCanvas.getContext("2d");
-
       const imgData = ctx.getImageData(0, 0, w, h);
       const maskData = maskCtx.getImageData(0, 0, w, h);
       const pixels = imgData.data;
       const maskPixels = maskData.data;
-
       const isMask = new Uint8Array(w * h);
       let minX = w,
         maxX = 0,
@@ -378,12 +354,10 @@ export default function App() {
           if (y > maxY) maxY = y;
         }
       }
-
       if (pixelsToFill === 0) {
         setIsProcessing(false);
         return;
       }
-
       minX = Math.max(0, minX - 2);
       maxX = Math.min(w - 1, maxX + 2);
       minY = Math.max(0, minY - 2);
@@ -391,7 +365,6 @@ export default function App() {
 
       let loopCount = 0;
       const maxLoops = 1000;
-
       while (pixelsToFill > 0 && loopCount < maxLoops) {
         loopCount++;
         const changes = [];
@@ -403,7 +376,6 @@ export default function App() {
                 gSum = 0,
                 bSum = 0,
                 count = 0;
-              const neighborColors = [];
               const neighbors = [
                 [x - 1, y],
                 [x + 1, y],
@@ -414,6 +386,7 @@ export default function App() {
                 [x - 1, y + 1],
                 [x + 1, y + 1],
               ];
+              const neighborColors = [];
               for (const [nx, ny] of neighbors) {
                 if (nx >= 0 && nx < w && ny >= 0 && ny < h) {
                   const ni = ny * w + nx;
@@ -430,7 +403,6 @@ export default function App() {
                   }
                 }
               }
-
               if (count > 0) {
                 let r = rSum / count;
                 let g = gSum / count;
@@ -438,21 +410,17 @@ export default function App() {
                 let variance = 0;
                 if (neighborColors.length > 1) {
                   let varSum = 0;
-                  for (const c of neighborColors) {
+                  for (const c of neighborColors)
                     varSum +=
                       Math.abs(c.r - r) + Math.abs(c.g - g) + Math.abs(c.b - b);
-                  }
                   variance = varSum / neighborColors.length;
                 }
                 const noiseScale = 0.6;
-                const noiseR = (Math.random() - 0.5) * variance * noiseScale;
-                const noiseG = (Math.random() - 0.5) * variance * noiseScale;
-                const noiseB = (Math.random() - 0.5) * variance * noiseScale;
                 changes.push({
-                  i: i,
-                  r: r + noiseR,
-                  g: g + noiseG,
-                  b: b + noiseB,
+                  i,
+                  r: r + (Math.random() - 0.5) * variance * noiseScale,
+                  g: g + (Math.random() - 0.5) * variance * noiseScale,
+                  b: b + (Math.random() - 0.5) * variance * noiseScale,
                 });
               }
             }
@@ -469,17 +437,16 @@ export default function App() {
         }
       }
 
-      // Blur Seam
-      const originalMaskData = maskCtx.getImageData(0, 0, w, h).data;
-      const smoothedPixels = new Uint8ClampedArray(pixels);
+      const originalMask = maskCtx.getImageData(0, 0, w, h).data;
+      const smoothed = new Uint8ClampedArray(pixels);
       for (let y = minY; y <= maxY; y++) {
         for (let x = minX; x <= maxX; x++) {
           const i = y * w + x;
-          if (originalMaskData[i * 4] > 50) {
-            let rSum = 0,
-              gSum = 0,
-              bSum = 0,
-              count = 0;
+          if (originalMask[i * 4] > 50) {
+            let rS = 0,
+              gS = 0,
+              bS = 0,
+              c = 0;
             for (let ky = -1; ky <= 1; ky++) {
               for (let kx = -1; kx <= 1; kx++) {
                 const nx = x + kx;
@@ -487,26 +454,24 @@ export default function App() {
                 if (nx >= 0 && nx < w && ny >= 0 && ny < h) {
                   const ni = ny * w + nx;
                   const off = ni * 4;
-                  rSum += pixels[off];
-                  gSum += pixels[off + 1];
-                  bSum += pixels[off + 2];
-                  count++;
+                  rS += pixels[off];
+                  gS += pixels[off + 1];
+                  bS += pixels[off + 2];
+                  c++;
                 }
               }
             }
             const off = i * 4;
             const blend = 0.2;
-            smoothedPixels[off] =
-              pixels[off] * (1 - blend) + (rSum / count) * blend;
-            smoothedPixels[off + 1] =
-              pixels[off + 1] * (1 - blend) + (gSum / count) * blend;
-            smoothedPixels[off + 2] =
-              pixels[off + 2] * (1 - blend) + (bSum / count) * blend;
+            smoothed[off] = pixels[off] * (1 - blend) + (rS / c) * blend;
+            smoothed[off + 1] =
+              pixels[off + 1] * (1 - blend) + (gS / c) * blend;
+            smoothed[off + 2] =
+              pixels[off + 2] * (1 - blend) + (bS / c) * blend;
           }
         }
       }
-      for (let i = 0; i < pixels.length; i++) pixels[i] = smoothedPixels[i];
-
+      for (let i = 0; i < pixels.length; i++) pixels[i] = smoothed[i];
       ctx.putImageData(imgData, 0, 0);
       setHistory((prev) => [...prev.slice(-4), ctx.getImageData(0, 0, w, h)]);
       clearMask();
@@ -536,7 +501,7 @@ export default function App() {
   };
 
   return (
-    <div className="min-h-screen bg-zinc-950 text-zinc-100 font-sans flex flex-col">
+    <div className="h-[100dvh] bg-zinc-950 text-zinc-100 font-sans flex flex-col overflow-hidden">
       {/* Settings Modal */}
       {showSettings && (
         <div className="fixed inset-0 bg-black/80 flex items-center justify-center z-50 p-4">
@@ -545,80 +510,77 @@ export default function App() {
               <Settings size={20} className="text-indigo-500" /> Settings
             </h2>
             <p className="text-sm text-zinc-400 mb-4">
-              Enter your Gemini API Key to enable AI features.
+              Enter Gemini API Key to enable AI features.
             </p>
             <input
               type="password"
-              placeholder="Enter Gemini API Key..."
               value={apiKey}
               onChange={(e) => setApiKey(e.target.value)}
-              className="w-full bg-zinc-950 border border-zinc-700 p-3 rounded-xl text-white mb-4 focus:border-indigo-500 outline-none transition-colors"
+              className="w-full bg-zinc-950 border border-zinc-700 p-3 rounded-xl text-white mb-4"
             />
-            <div className="flex justify-end gap-2">
-              <button
-                onClick={() => setShowSettings(false)}
-                className="px-4 py-2 bg-zinc-800 hover:bg-zinc-700 rounded-lg text-sm font-medium transition-colors"
-              >
-                Close
-              </button>
-            </div>
+            <button
+              onClick={() => setShowSettings(false)}
+              className="px-4 py-2 bg-zinc-800 hover:bg-zinc-700 rounded-lg text-sm w-full"
+            >
+              Close
+            </button>
           </div>
         </div>
       )}
 
-      {/* Header */}
-      <header className="border-b border-zinc-800 bg-zinc-900 p-4 flex items-center justify-between shadow-md z-10">
+      {/* Header - Compact on mobile */}
+      <header className="border-b border-zinc-800 bg-zinc-900 px-3 py-2 md:p-4 flex items-center justify-between shadow-md z-20 shrink-0 h-14 md:h-16">
         <div className="flex items-center gap-2">
-          <div className="bg-indigo-600 p-2 rounded-lg">
-            <Wand2 size={20} className="text-white" />
+          <div className="bg-indigo-600 p-1.5 md:p-2 rounded-lg">
+            <Wand2 size={18} className="text-white" />
           </div>
-          <h1 className="text-xl font-bold tracking-tight text-zinc-100">
+          <h1 className="text-lg md:text-xl font-bold tracking-tight text-zinc-100">
             Clean<span className="text-indigo-500">Slate</span> AI
           </h1>
         </div>
-        <div className="flex items-center gap-2">
+        <div className="flex items-center gap-1 md:gap-2">
           <button
             onClick={() => setShowSettings(true)}
-            className="p-2 text-zinc-400 hover:text-white hover:bg-zinc-800 rounded-lg transition-colors"
-            title="Settings"
+            className="p-2 text-zinc-400 hover:text-white"
           >
             <Settings size={18} />
           </button>
           {image && (
-            <div className="flex gap-2">
+            <>
               <button
                 onClick={() => setImage(null)}
-                className="text-sm text-zinc-400 hover:text-white transition-colors flex items-center gap-2 px-3 py-1.5 rounded-md hover:bg-zinc-800"
+                className="p-2 md:px-3 md:py-1.5 text-zinc-400 hover:bg-zinc-800 rounded-md"
               >
-                <X size={16} /> Close
+                <X size={18} />
               </button>
               <button
                 onClick={handleDownload}
-                className="bg-indigo-600 hover:bg-indigo-700 text-white px-4 py-1.5 rounded-md text-sm font-medium transition-colors flex items-center gap-2"
+                className="bg-indigo-600 text-white p-2 md:px-4 md:py-1.5 rounded-md text-sm font-medium flex gap-2 items-center"
               >
-                <Download size={16} /> Download
+                <Download size={16} />
+                <span className="hidden md:inline">Download</span>
               </button>
-            </div>
+            </>
           )}
         </div>
       </header>
 
-      {/* Main Content */}
-      <main className="flex-1 flex overflow-hidden relative">
+      {/* Main Content - Flex Column Reverse on Mobile (Canvas Top, Tools Bottom) */}
+      <main className="flex-1 flex flex-col-reverse md:flex-row overflow-hidden relative">
         {!image ? (
-          <div className="w-full flex items-center justify-center p-6">
-            <label className="w-full max-w-2xl h-96 border-2 border-dashed border-zinc-700 rounded-2xl flex flex-col items-center justify-center cursor-pointer hover:border-indigo-500 hover:bg-zinc-900/50 transition-all group">
+          <div className="w-full h-full flex items-center justify-center p-6">
+            <label className="w-full max-w-md h-64 md:h-96 border-2 border-dashed border-zinc-700 rounded-2xl flex flex-col items-center justify-center cursor-pointer hover:border-indigo-500 hover:bg-zinc-900/50 transition-all">
               <input
                 type="file"
                 accept="image/*"
                 onChange={handleImageUpload}
                 className="hidden"
               />
-              <div className="bg-zinc-800 p-4 rounded-full mb-4 group-hover:scale-110 transition-transform shadow-lg">
-                <ImageIcon size={48} className="text-indigo-400" />
+              <div className="bg-zinc-800 p-4 rounded-full mb-4">
+                <ImageIcon size={32} className="text-indigo-400" />
               </div>
-              <h2 className="text-2xl font-semibold text-zinc-200 mb-2">
-                Upload an Image
+              <h2 className="text-xl font-semibold text-zinc-200 mb-2">
+                Upload Image
               </h2>
               <p className="text-zinc-500 text-center max-w-md">
                 Click to browse or drag and drop your image here. <br />
@@ -630,168 +592,150 @@ export default function App() {
           </div>
         ) : (
           <>
-            {/* Toolbar */}
-            <aside className="w-80 bg-zinc-900 border-r border-zinc-800 flex flex-col z-10 shadow-xl overflow-y-auto">
-              {/* AI Features Section */}
-              <div className="p-4 border-b border-zinc-800 bg-indigo-900/10">
-                <h3 className="text-xs font-bold text-indigo-400 uppercase tracking-wider mb-4 flex items-center gap-2">
-                  <Sparkles size={12} /> Gemini AI Power Tools
+            {/* Toolbar - Bottom on Mobile (Height limited), Left on Desktop */}
+            <aside
+              className="
+                w-full md:w-80 
+                bg-zinc-900 border-t md:border-t-0 md:border-r border-zinc-800 
+                flex flex-col z-10 shadow-xl 
+                overflow-y-auto 
+                h-[45vh] md:h-auto md:flex-none
+            "
+            >
+              {/* AI Section */}
+              <div className="p-3 md:p-4 border-b border-zinc-800 bg-indigo-900/10">
+                <h3 className="text-[10px] md:text-xs font-bold text-indigo-400 uppercase tracking-wider mb-2 flex items-center gap-2">
+                  <Sparkles size={12} /> Gemini AI
                 </h3>
-                <div className="grid grid-cols-1 gap-3">
+                <div className="grid grid-cols-2 md:grid-cols-1 gap-2">
                   <button
                     onClick={handleAiErase}
                     disabled={isAiWorking}
-                    className="w-full bg-indigo-600 hover:bg-indigo-500 text-white px-4 py-3 rounded-lg flex items-center gap-3 transition-all shadow-lg shadow-indigo-900/20 group disabled:opacity-50 disabled:cursor-wait"
+                    className="bg-indigo-600 hover:bg-indigo-500 text-white p-2 md:px-4 md:py-3 rounded-lg flex flex-col md:flex-row items-center gap-2 text-center md:text-left shadow-lg disabled:opacity-50"
                   >
-                    <div className="bg-white/20 p-1.5 rounded">
-                      <Zap size={16} className="text-white" />
-                    </div>
-                    <div className="text-left">
-                      <div className="font-bold text-sm">Magic Erase</div>
-                      <div className="text-[10px] text-indigo-200">
-                        Generative Fill (Bottom Right)
+                    <Zap size={16} />
+                    <div>
+                      <div className="font-bold text-xs md:text-sm">
+                        Magic Erase
+                      </div>
+                      <div className="hidden md:block text-[10px] text-indigo-200">
+                        Generative Fill
                       </div>
                     </div>
                   </button>
-
                   <button
                     onClick={handleAiAnalyze}
                     disabled={isAiWorking}
-                    className="w-full bg-zinc-800 hover:bg-zinc-700 border border-zinc-700 text-white px-4 py-3 rounded-lg flex items-center gap-3 transition-all group disabled:opacity-50 disabled:cursor-wait"
+                    className="bg-zinc-800 border border-zinc-700 text-white p-2 md:px-4 md:py-3 rounded-lg flex flex-col md:flex-row items-center gap-2 text-center md:text-left disabled:opacity-50"
                   >
-                    <div className="bg-zinc-700 group-hover:bg-zinc-600 p-1.5 rounded">
-                      <Brain size={16} className="text-zinc-300" />
-                    </div>
-                    <div className="text-left">
-                      <div className="font-bold text-sm">Analyze & Caption</div>
-                      <div className="text-[10px] text-zinc-400">
-                        Generate tags & description
+                    <Brain size={16} />
+                    <div>
+                      <div className="font-bold text-xs md:text-sm">
+                        Analyze
+                      </div>
+                      <div className="hidden md:block text-[10px] text-zinc-400">
+                        Caption & Tags
                       </div>
                     </div>
                   </button>
                 </div>
-
                 {isAiWorking && (
-                  <div className="mt-3 text-xs text-center text-indigo-300 animate-pulse">
-                    {aiMode === "remove"
-                      ? "✨ Gemini is painting..."
-                      : "🧠 Gemini is thinking..."}
+                  <div className="mt-2 text-xs text-center text-indigo-300 animate-pulse">
+                    Running AI...
                   </div>
                 )}
               </div>
 
-              {/* Analysis Result Box */}
+              {/* Analysis Result */}
               {aiAnalysis && (
-                <div className="p-4 border-b border-zinc-800 bg-zinc-800/50">
-                  <div className="flex justify-between items-center mb-2">
-                    <h3 className="text-xs font-bold text-zinc-400 uppercase">
-                      Analysis Result
-                    </h3>
-                    <button
-                      onClick={handleSpeak}
-                      className="text-zinc-400 hover:text-indigo-400 transition-colors"
-                      title="Read Aloud"
-                    >
-                      <Volume2 size={14} />
+                <div className="p-3 md:p-4 border-b border-zinc-800 bg-zinc-800/50">
+                  <div className="flex justify-between items-center mb-1">
+                    <h3 className="text-xs font-bold text-zinc-400">Result</h3>
+                    <button onClick={handleSpeak}>
+                      <Volume2 size={14} className="text-zinc-400" />
                     </button>
                   </div>
-                  <div className="bg-zinc-950 p-3 rounded-lg border border-zinc-800 text-xs text-zinc-300 max-h-40 overflow-y-auto whitespace-pre-wrap leading-relaxed">
+                  <div className="bg-zinc-950 p-2 rounded border border-zinc-800 text-[10px] md:text-xs text-zinc-300 max-h-20 overflow-y-auto">
                     {aiAnalysis}
                   </div>
                 </div>
               )}
 
-              {/* Local Tools */}
-              <div className="p-4 border-b border-zinc-800">
-                <h3 className="text-xs font-bold text-zinc-500 uppercase tracking-wider mb-4">
-                  Manual Tools
+              {/* Manual Tools */}
+              <div className="p-3 md:p-4 flex-1">
+                <h3 className="text-[10px] md:text-xs font-bold text-zinc-500 uppercase tracking-wider mb-2">
+                  Manual
                 </h3>
-                <div className="space-y-3">
+                <div className="flex flex-row md:flex-col gap-2 mb-3">
                   <button
                     onClick={selectBottomRight}
-                    className="w-full bg-zinc-800 hover:bg-zinc-700 text-left px-4 py-3 rounded-lg flex items-center gap-3 transition-all border border-zinc-700 group"
+                    className="flex-1 bg-zinc-800 p-2 rounded-lg flex items-center justify-center md:justify-start gap-2 border border-zinc-700"
                   >
-                    <div className="bg-zinc-700 group-hover:bg-zinc-600 p-1.5 rounded transition-colors">
-                      <div className="w-4 h-4 border-r-2 border-b-2 border-current"></div>
-                    </div>
-                    <div>
-                      <div className="font-medium text-sm">
-                        Select Bottom-Right
-                      </div>
-                      <div className="text-xs text-zinc-500">
-                        Auto-target watermark
-                      </div>
-                    </div>
+                    <div className="w-3 h-3 border-r-2 border-b-2 border-white"></div>
+                    <span className="text-xs">Bottom-Right</span>
                   </button>
-                  <div className="bg-zinc-800/50 p-4 rounded-lg border border-zinc-800">
-                    <label className="text-xs text-zinc-400 font-medium mb-2 block flex justify-between">
-                      <span>Brush Size</span>
-                      <span>{brushSize}px</span>
-                    </label>
+                  <div className="flex-1 bg-zinc-800 p-2 rounded-lg border border-zinc-700 flex items-center gap-2 px-3">
+                    <div
+                      className="w-2 h-2 bg-red-500 rounded-full shrink-0"
+                      style={{ transform: `scale(${brushSize / 20})` }}
+                    ></div>
                     <input
                       type="range"
                       min="5"
-                      max="100"
+                      max="50"
                       value={brushSize}
                       onChange={(e) => setBrushSize(Number(e.target.value))}
-                      className="w-full accent-indigo-500 h-1.5 bg-zinc-700 rounded-lg appearance-none cursor-pointer"
+                      className="w-full accent-indigo-500 h-1 bg-zinc-600 rounded-lg appearance-none"
                     />
-                    <div className="mt-2 flex justify-center">
-                      <div
-                        className="bg-red-500/50 rounded-full"
-                        style={{ width: brushSize, height: brushSize }}
-                      ></div>
-                    </div>
                   </div>
                 </div>
-              </div>
 
-              <div className="p-4 mt-auto">
-                <div className="grid grid-cols-2 gap-2 mb-3">
+                <div className="grid grid-cols-2 gap-2 mb-2">
                   <button
                     onClick={handleUndo}
                     disabled={history.length <= 1}
-                    className="px-3 py-2 bg-zinc-800 hover:bg-zinc-700 disabled:opacity-50 rounded-lg text-xs font-medium flex items-center justify-center gap-2"
+                    className="bg-zinc-800 p-2 rounded-lg text-xs flex items-center justify-center gap-1 disabled:opacity-50"
                   >
-                    <RefreshCcw size={14} className="-scale-x-100" /> Undo
+                    <RefreshCcw size={12} className="-scale-x-100" /> Undo
                   </button>
                   <button
                     onClick={clearMask}
-                    className="px-3 py-2 bg-zinc-800 hover:bg-zinc-700 rounded-lg text-xs font-medium flex items-center justify-center gap-2"
+                    className="bg-zinc-800 p-2 rounded-lg text-xs flex items-center justify-center gap-1"
                   >
-                    <Eraser size={14} /> Clear
+                    <Eraser size={12} /> Clear
                   </button>
                 </div>
+
                 <button
                   onClick={removeWatermarkLocal}
                   disabled={isProcessing}
-                  className={`w-full py-3 px-4 rounded-xl font-bold text-white shadow-lg shadow-zinc-900/20 flex items-center justify-center gap-2 relative overflow-hidden ${
+                  className={`w-full py-3 rounded-xl font-bold text-white shadow-lg flex items-center justify-center gap-2 ${
                     isProcessing
-                      ? "bg-zinc-700 cursor-wait"
+                      ? "bg-zinc-700"
                       : "bg-zinc-700 hover:bg-zinc-600"
-                  } transition-all`}
+                  }`}
                 >
                   {isProcessing ? (
-                    <span className="relative z-10">Processing...</span>
+                    "Processing..."
                   ) : (
                     <>
-                      <Wand2 size={18} /> Algorithmic Remove
+                      <Wand2 size={16} /> Clean (Local)
                     </>
                   )}
                 </button>
               </div>
             </aside>
 
-            {/* Canvas Area */}
+            {/* Canvas Area - Top on Mobile, Right on Desktop */}
             <div
-              className="flex-1 bg-zinc-950 overflow-auto flex items-center justify-center p-8 relative"
+              className="flex-1 bg-zinc-950 overflow-hidden flex items-center justify-center relative p-2 md:p-8"
               ref={containerRef}
             >
-              <div className="relative shadow-2xl shadow-black/50">
+              <div className="relative shadow-2xl shadow-black/50 max-w-full max-h-full">
                 <canvas
                   ref={canvasRef}
-                  className="block max-w-none"
-                  style={{ maxHeight: "85vh", maxWidth: "100%" }}
+                  className="block max-w-full max-h-full object-contain"
+                  style={{ maxHeight: "calc(100vh - 250px)" }}
                 />
                 <canvas
                   ref={maskCanvasRef}
@@ -802,17 +746,11 @@ export default function App() {
                   onTouchStart={startDrawing}
                   onTouchMove={draw}
                   onTouchEnd={stopDrawing}
-                  className="absolute top-0 left-0 cursor-crosshair touch-none"
-                  style={{
-                    maxHeight: "85vh",
-                    maxWidth: "100%",
-                    width: "100%",
-                    height: "100%",
-                  }}
+                  className="absolute top-0 left-0 cursor-crosshair touch-none w-full h-full"
                 />
               </div>
-              <div className="absolute top-4 left-1/2 -translate-x-1/2 bg-zinc-800/90 backdrop-blur text-zinc-200 px-4 py-2 rounded-full text-sm shadow-lg pointer-events-none border border-white/10">
-                Draw over the watermark to remove it
+              <div className="absolute top-2 left-1/2 -translate-x-1/2 bg-zinc-800/80 backdrop-blur text-zinc-300 px-3 py-1 rounded-full text-[10px] md:text-sm border border-white/10 pointer-events-none whitespace-nowrap">
+                Draw to remove
               </div>
             </div>
           </>
